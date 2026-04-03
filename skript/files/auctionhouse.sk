@@ -1,0 +1,312 @@
+# this skript was made by pwR (@pwR_9401 on discord), but i DID use AI for the comments.
+# skript is by me tho :)
+
+options:
+	prefix: &7[&6AH&7] &7
+	admin_perm: skript.ah.admin
+	max_time: 72 hours  # Items will expire after this duration
+
+on load:
+	# Initialize the ID counter so every listing has a unique identifier
+	set {ah::id_counter} to {ah::id_counter} ? 0
+
+# --- INTERNAL FUNCTIONS ---
+
+# Handles messaging players even if they are offline (stores notifications)
+function notify_player(p: offline player, msg: text):
+	set {_u} to uuid of {_p}
+	if {_p} is online:
+		send "{@prefix}%{_msg}%" to {_p}
+	else:
+		add "{_msg}" to {ah::notifications::%{_u}%::*}
+
+# Safely returns items to players (handles full inventories and offline status)
+function queue_return(p: offline player, i: item, reason: text):
+	set {_u} to uuid of {_p}
+	
+	if {_p} is online:
+		if {_p} has space for {_i}:
+			give {_i} to {_p}
+			send "{@prefix}&aAn item (%type of {_i}%) was returned to you. Reason: %{_reason}%" to {_p}
+			stop
+		else:
+			send "{@prefix}&cAn item was returned, but your inventory is full! Re-log with space to claim it." to {_p}
+	
+	# If player is offline or inventory is full, store the item in a recovery variable
+	add {_i} to {ah::pending_return::%{_u}%::*}
+	if {_p} is offline:
+		add "&cAn item (%type of {_i}%) was sent to your recovery queue. Reason: %{_reason}%" to {ah::notifications::%{_u}%::*}
+
+# --- EVENT HANDLERS ---
+
+on join:
+	set {_u} to uuid of player
+	# Deliver any missed notifications (sales, bans, etc.)
+	if {ah::notifications::%{_u}%::*} is set:
+		wait 3 seconds
+		send "{@prefix}&eWhile you were away:" to player
+		loop {ah::notifications::%{_u}%::*}:
+			send "&7- %loop-value%" to player
+		delete {ah::notifications::%{_u}%::*}
+	
+	# Automatically try to give back items from the recovery queue
+	if {ah::pending_return::%{_u}%::*} is set:
+		wait 1 second
+		loop {ah::pending_return::%{_u}%::*}:
+			if player has space for loop-value:
+				give loop-value to player
+				remove loop-value from {ah::pending_return::%{_u}%::*}
+				send "{@prefix}&aClaimed &e%type of loop-value% &afrom your recovery queue."
+			else:
+				send "{@prefix}&cYour inventory is still full! Clear space to claim pending AH items."
+				stop loop
+
+# Background task to clean up old listings
+every 1 hour:
+	loop {ah::items::*}:
+		set {_id} to loop-index
+		if difference between {ah::listed_date::%{_id}%} and now >= {@max_time}:
+			queue_return({ah::seller::%{_id}%}, {ah::items::%{_id}%}, "Listing Expired")
+			delete {ah::items::%{_id}%}
+			delete {ah::price::%{_id}%}
+			delete {ah::seller::%{_id}%}
+			delete {ah::listed_date::%{_id}%}
+
+# --- COMMANDS ---
+
+command /auctionhouse:
+	aliases: /ah
+	trigger:
+		if {ah::banned::%uuid of player%} is set:
+			send "{@prefix}&cYou are currently banned from using the Auction House."
+			stop
+		open_ah_main(player, 1)
+
+command /ahadmin [<text>] [<offline player>]:
+	permission: {@admin_perm}
+	trigger:
+		if arg-1 is "clear":
+			delete {ah::items::*}
+			delete {ah::price::*}
+			delete {ah::seller::*}
+			delete {ah::listed_date::*}
+			send "{@prefix}&cEntire AH database wiped."
+		else if arg-1 is "remove":
+			if arg-2 is set:
+				set {_u} to uuid of arg-2
+				loop {ah::items::*}:
+					if uuid of {ah::seller::%loop-index%} is {_u}:
+						queue_return(arg-2, {ah::items::%loop-index%}, "Removed by Admin")
+						set {_id} to loop-index
+						delete {ah::items::%{_id}%}
+						delete {ah::price::%{_id}%}
+						delete {ah::seller::%{_id}%}
+						delete {ah::listed_date::%{_id}%}
+				send "{@prefix}&aAll items for %arg-2% removed and returned."
+		else if arg-1 is "ban":
+			if arg-2 is set:
+				set {ah::banned::%uuid of arg-2%} to true
+				send "{@prefix}&cYou banned %arg-2% from the AH."
+				notify_player(arg-2, "&4You have been banned from using the Auction House.")
+		else if arg-1 is "unban":
+			if arg-2 is set:
+				delete {ah::banned::%uuid of arg-2%}
+				send "{@prefix}&aYou unbanned %arg-2%."
+				notify_player(arg-2, "&aYour AH ban has been lifted.")
+		else:
+			send "{@prefix}&6/ahadmin <clear|remove|ban|unban> <player>"
+
+# --- GUI MENUS ---
+
+# The main browsing menu
+function open_ah_main(p: player, page: number):
+	set {_gui} to chest inventory with 6 rows named "Auction House - Page %{_page}%"
+	loop integers from 45 to 53:
+		set slot loop-integer of {_gui} to gray stained glass pane named " "
+	set slot 45 of {_gui} to sunflower named "&6&lList Item" with lore "&eClick to list an item."
+	set slot 49 of {_gui} to book named "&b&lMy Auctions" with lore "&eManage your active listings."
+	
+	set {_u} to uuid of {_p}
+	delete {ah::viewing::%{_u}%::*} # Clear current view cache
+	set {_slot} to 0
+	set {_start} to ({_page} - 1) * 45
+	set {_count} to 0
+	
+	loop {ah::items::*}:
+		add 1 to {_count}
+		if {_count} > {_start}:
+			set {_id} to loop-index
+			set {_item} to {ah::items::%{_id}%}
+			set {_lore::*} to lore of {_item}
+			
+			# Calculate expiration time
+			set {_diff} to difference between {ah::listed_date::%{_id}%} and now
+			set {_secondsLeft} to (72 * 3600) - (unix timestamp of {_diff})
+			set {_h} to floor({_secondsLeft} / 3600)
+			
+			# Append AH info to the item lore
+			add "&8&m----------------" to {_lore::*}
+			add "&7Seller: &f%{ah::seller::%{_id}%}%" to {_lore::*}
+			add "&7Price: &6$%{ah::price::%{_id}%}%" to {_lore::*}
+			add "&7Expires: &b%{_h}%h" to {_lore::*}
+			if {_p} has permission "{@admin_perm}":
+				add "&c&lMIDDLE-CLICK TO FORCE REMOVE" to {_lore::*}
+			add "" to {_lore::*}
+			add "&eClick to Purchase" to {_lore::*}
+			
+			set lore of {_item} to {_lore::*}
+			set slot {_slot} of {_gui} to {_item}
+			# Map the GUI slot to the internal AH ID
+			set {ah::viewing::%{_u}%::%{_slot}%} to {_id}
+			add 1 to {_slot}
+		if {_slot} > 44: # End page if slot 45 is reached
+			stop loop
+	open {_gui} to {_p}
+
+# Menu showing only the player's own listings
+function open_my_auctions(p: player):
+	set {_gui} to chest inventory with 6 rows named "My Auctions"
+	loop integers from 45 to 53:
+		set slot loop-integer of {_gui} to gray stained glass pane named " "
+	set slot 49 of {_gui} to arrow named "&7&l<- Back"
+	set {_u} to uuid of {_p}
+	delete {ah::viewing::%{_u}%::*}
+	set {_slot} to 0
+	loop {ah::items::*}:
+		if uuid of {ah::seller::%loop-index%} is {_u}:
+			set {_i} to {ah::items::%loop-index%}
+			set lore of {_i} to "&8&m----------------||&cClick to reclaim"
+			set slot {_slot} of {_gui} to {_i}
+			set {ah::viewing::%{_u}%::%{_slot}%} to loop-index
+			add 1 to {_slot}
+	open {_gui} to {_p}
+
+# UI to drop an item in for listing
+function open_listing_gui(p: player):
+	set {_gui} to chest inventory with 4 rows named "List an Item"
+	loop integers from 0 to 35:
+		set slot loop-integer of {_gui} to gray stained glass pane named " "
+	set slot 13 of {_gui} to air # The "Input" slot
+	set slot 22 of {_gui} to green stained glass named "&a&lConfirm Listing"
+	set slot 31 of {_gui} to arrow named "&7&l<- Back"
+	open {_gui} to {_p}
+
+# --- INTERACTION LOGIC ---
+
+on inventory click:
+	set {_name} to name of event-inventory
+	{_name} contains "Auction House" or "My Auctions" or "List an Item"
+	
+	# Allow clicking the input slot in Listing GUI
+	if {_name} is "List an Item":
+		if index of event-slot is 13:
+			stop
+			
+	clicked inventory is not player's inventory
+	cancel event 
+	
+	set {_u} to uuid of player
+	set {_id} to {ah::viewing::%{_u}%::%index of event-slot%}
+
+	# Handle Item Purchase or Removal
+	if {_id} is set:
+		# Safety check: ensure item still exists
+		if {ah::items::%{_id}%} is not set:
+			send "{@prefix}&cThis listing no longer exists."
+			open_ah_main(player, 1)
+			stop
+
+		# Admin Force Remove
+		if click type is middle mouse button:
+			if player has permission "{@admin_perm}":
+				queue_return({ah::seller::%{_id}%}, {ah::items::%{_id}%}, "Admin Removal")
+				delete {ah::items::%{_id}%}
+				delete {ah::price::%{_id}%}
+				delete {ah::seller::%{_id}%}
+				delete {ah::listed_date::%{_id}%}
+				send "{@prefix}&cItem removed."
+				open_ah_main(player, 1)
+				stop
+
+		set {_seller} to {ah::seller::%{_id}%}
+		set {_price} to {ah::price::%{_id}%}
+		set {_item} to {ah::items::%{_id}%}
+
+		# Seller reclaiming their own item
+		if player is {_seller}:
+			if player has space for {_item}:
+				give {_item} to player
+				delete {ah::items::%{_id}%}
+				delete {ah::price::%{_id}%}
+				delete {ah::seller::%{_id}%}
+				delete {ah::listed_date::%{_id}%}
+				send "{@prefix}&aListing cancelled."
+				if {_name} contains "My":
+					open_my_auctions(player)
+				else:
+					open_ah_main(player, 1)
+		
+		# Buyer purchasing the item
+		else:
+			if player's balance >= {_price}:
+				if player has space for {_item}:
+					remove {_price} from player's balance
+					add {_price} to {_seller}'s balance
+					give {_item} to player
+					send "{@prefix}&aSuccess! Purchased &e%type of {_item}% &afor &6$%{_price}%&a."
+					notify_player({_seller}, "&aYour listing &e%type of {_item}% &awas bought by &f%player% &afor &6$%{_price}%&a!")
+					delete {ah::items::%{_id}%}
+					delete {ah::price::%{_id}%}
+					delete {ah::seller::%{_id}%}
+					delete {ah::listed_date::%{_id}%}
+					open_ah_main(player, 1)
+				else:
+					send "{@prefix}&cYour inventory is full!"
+			else:
+				set {_needed} to {_price} - player's balance
+				send "{@prefix}&cYou need &6$%{_needed}% &cmore to buy this."
+
+	# Navigation Buttons
+	if index of event-slot is 45: # Open List GUI
+		if {_name} contains "Auction House":
+			open_listing_gui(player)
+	else if index of event-slot is 49: # My Auctions Toggle
+		if {_name} contains "Auction House":
+			open_my_auctions(player)
+		else if {_name} contains "My Auctions":
+			open_ah_main(player, 1)
+	else if index of event-slot is 31: # Back Button
+		if {_name} is "List an Item":
+			set {_ret} to slot 13 of event-inventory
+			give {_ret} to player if {_ret} is not air
+			open_ah_main(player, 1)
+	else if index of event-slot is 22: # Confirm List (starts chat listener)
+		if {_name} is "List an Item":
+			set {_i} to slot 13 of event-inventory
+			if {_i} is air:
+				send "{@prefix}&cPut an item in the slot!"
+				stop
+			set {ah::temp_item::%{_u}%} to {_i}
+			set slot 13 of event-inventory to air
+			close player's inventory
+			send "{@prefix}&eType the listing price in chat."
+
+# Chat listener to set the price
+on chat:
+	set {_u} to uuid of player
+	if {ah::temp_item::%{_u}%} is set:
+		cancel event
+		set {_p} to message parsed as number
+		if {_p} > 0:
+			add 1 to {ah::id_counter}
+			set {_id} to "ah-%{ah::id_counter}%"
+			set {ah::items::%{_id}%} to {ah::temp_item::%{_u}%}
+			set {ah::price::%{_id}%} to {_p}
+			set {ah::seller::%{_id}%} to player
+			set {ah::listed_date::%{_id}%} to now
+			delete {ah::temp_item::%{_u}%}
+			send "{@prefix}&aItem listed for &6$%{_p}%&a!"
+		else:
+			send "{@prefix}&cInvalid price. Listing cancelled."
+			give {ah::temp_item::%{_u}%} to player
+			delete {ah::temp_item::%{_u}%}
