@@ -86,11 +86,16 @@ command /ahadmin [<text>] [<offline player>]:
 	permission: {@admin_perm}
 	trigger:
 		if arg-1 is "clear":
-			delete {ah::items::*}
-			delete {ah::price::*}
-			delete {ah::seller::*}
-			delete {ah::listed_date::*}
-			send "{@prefix}&cEntire AH database wiped."
+			loop {ah::items::*}:
+				set {_id} to loop-index
+				queue_return({ah::seller::%{_id}%}, {ah::items::%{_id}%}, "Auction House Wipe")
+				
+				# Clean up the specific item data
+				delete {ah::items::%{_id}%}
+				delete {ah::price::%{_id}%}
+				delete {ah::seller::%{_id}%}
+				delete {ah::listed_date::%{_id}%}
+			send "{@prefix}&aEntire AH cleared and all items returned to sellers." [cite: 4, 8]
 		else if arg-1 is "remove":
 			if arg-2 is set:
 				set {_u} to uuid of arg-2
